@@ -89,10 +89,10 @@ def create_pjsua_config():
         f"--null-audio\n"
         f"--use-cli\n"
         f"--cli-telnet-port {PJSUA_CLI_PORT}\n"
-        f"--local-port {SIP_PORT}\n"             # <-- fixed: was --port
-        f"--log-level 5\n"
-        f"--app-log-level 5\n"
-        f"--log-file /tmp/pjsua.log\n"
+        f"--local-port {SIP_PORT}\n"
+        # IMPORTANT: do NOT use --log-file here.
+        # PJSUA detects file redirection and immediately exits with:
+        # "Cannot switch back to console from file redirection -> Quitting app"
     )
     with open('/tmp/pjsua.conf', 'w') as f:
         f.write(config)
@@ -145,12 +145,24 @@ def start_pjsua():
 
     create_pjsua_config()
 
-    # Kill any leftover PJSUA
+    # Kill any leftover PJSUA and wait for port 5060 to be free
     try:
-        subprocess.run(['pkill', '-f', 'pjsua'], capture_output=True)
-        time.sleep(1)
+        subprocess.run(['pkill', '-9', '-f', 'pjsua'], capture_output=True)
     except Exception:
         pass
+
+    # Wait up to 5s for SIP port to be released before relaunching
+    for _ in range(10):
+        time.sleep(0.5)
+        try:
+            test = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            test.bind(('', SIP_PORT))
+            test.close()
+            break  # port is free
+        except OSError:
+            logger.debug(f"Waiting for port {SIP_PORT} to be released...")
+    else:
+        logger.warning(f"Port {SIP_PORT} still in use after wait, launching anyway")
 
     logger.info(f"Launching PJSUA: {pjsua_cmd} --config-file=/tmp/pjsua.conf")
     try:

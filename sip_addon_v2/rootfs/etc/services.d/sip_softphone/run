@@ -1,0 +1,41 @@
+#!/usr/bin/with-contenv bashio
+# ==============================================================================
+# SIP Softphone service
+# ==============================================================================
+
+bashio::log.info "Starting SIP Softphone..."
+
+# Read configuration
+SIP_SERVER=$(bashio::config 'sip_server')
+EXTENSION=$(bashio::config 'extension')
+PASSWORD=$(bashio::config 'password')
+PORT=$(bashio::config 'port')
+LOG_LEVEL=$(bashio::config 'log_level')
+
+# Validate configuration
+if bashio::var.is_empty "${SIP_SERVER}"; then
+    bashio::exit.nok "SIP server is not configured!"
+fi
+
+if bashio::var.is_empty "${EXTENSION}"; then
+    bashio::exit.nok "Extension is not configured!"
+fi
+
+if bashio::var.is_empty "${PASSWORD}"; then
+    bashio::exit.nok "Password is not configured!"
+fi
+
+bashio::log.info "SIP Server: ${SIP_SERVER}"
+bashio::log.info "Extension: ${EXTENSION}"
+bashio::log.info "Port: ${PORT}"
+
+# Export configuration
+export SIP_SERVER
+export EXTENSION
+export PASSWORD
+export PORT
+export LOG_LEVEL
+
+# Start application
+cd /app
+exec python3 app.py

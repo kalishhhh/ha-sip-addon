@@ -1,0 +1,32 @@
+{
+  "name": "SIP Softphone",
+  "version": "1.0.0",
+  "slug": "sip_softphone",
+  "description": "SIP softphone for handling voice calls in Home Assistant",
+  "arch": ["aarch64", "amd64", "armv7"],
+  "startup": "services",
+  "boot": "auto",
+  "host_network": true,
+  "ports": {
+    "5060/tcp": 5060,
+    "5060/udp": 5060
+  },
+  "ports_description": {
+    "5060/tcp": "SIP TCP Port",
+    "5060/udp": "SIP UDP Port"
+  },
+  "options": {
+    "sip_server": "",
+    "extension": "",
+    "password": "",
+    "port": 5060,
+    "log_level": "info"
+  },
+  "schema": {
+    "sip_server": "str",
+    "extension": "str",
+    "password": "password",
+    "port": "port",
+    "log_level": "list(debug|info|warning|error)?"
+  }
+}

@@ -142,20 +142,31 @@ def read_pjsua_output():
 
 
 def send_pjsua_command(command):
-    """Send command to PJSUA CLI"""
-    global pjsua_process
-    
+    global pjsua_process, pjsua_running
     if not pjsua_process or not pjsua_running:
         logger.error("PJSUA not running")
         return False
-    
     try:
         pjsua_process.stdin.write(command + '\n')
         pjsua_process.stdin.flush()
         return True
+    except BrokenPipeError:
+        logger.error("PJSUA pipe broken - process likely died, marking as not running")
+        pjsua_running = False   # <-- KEY FIX: stop pretending it's alive
+        return False
     except Exception as e:
         logger.error(f"Failed to send command to PJSUA: {e}")
         return False
+    
+def watchdog_pjsua():
+    """Restart PJSUA if it dies"""
+    global pjsua_process, pjsua_running
+    while True:
+        time.sleep(10)
+        if pjsua_process and pjsua_process.poll() is not None:
+            logger.warning("PJSUA process died, restarting...")
+            pjsua_running = False
+            start_pjsua()    
 
 
 def stop_pjsua():

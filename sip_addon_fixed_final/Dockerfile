@@ -7,6 +7,8 @@ RUN apk add --no-cache \
     python3 \
     py3-pip \
     pjproject \
+    pjproject-dev \
+    pjsua \
     alsa-lib \
     alsa-utils
 

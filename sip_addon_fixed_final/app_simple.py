@@ -11,6 +11,7 @@ import signal
 import subprocess
 import threading
 import time
+import shutil
 from flask import Flask, request, jsonify
 
 # Configure logging
@@ -33,6 +34,41 @@ app = Flask(__name__)
 # Global variables
 pjsua_process = None
 pjsua_running = False
+pjsua_cmd = None
+
+
+def find_pjsua():
+    """Find pjsua binary"""
+    global pjsua_cmd
+    
+    # Try common names
+    for cmd in ['pjsua', 'pjsua-cli', 'pjsua2']:
+        path = shutil.which(cmd)
+        if path:
+            logger.info(f"Found PJSUA at: {path}")
+            pjsua_cmd = cmd
+            return True
+    
+    # Try to find in common locations
+    for location in ['/usr/bin', '/usr/local/bin', '/opt']:
+        try:
+            result = subprocess.run(
+                ['find', location, '-name', 'pjsua*', '-type', 'f'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.stdout.strip():
+                paths = result.stdout.strip().split('\n')
+                if paths:
+                    pjsua_cmd = paths[0]
+                    logger.info(f"Found PJSUA at: {pjsua_cmd}")
+                    return True
+        except:
+            pass
+    
+    logger.error("PJSUA binary not found!")
+    return False
 
 
 def create_pjsua_config():
@@ -58,12 +94,17 @@ def start_pjsua():
     """Start PJSUA process"""
     global pjsua_process, pjsua_running
     
+    if not find_pjsua():
+        logger.error("Cannot start PJSUA - binary not found")
+        return False
+    
     try:
         create_pjsua_config()
         
         # Start PJSUA with config file
+        logger.info(f"Starting PJSUA with command: {pjsua_cmd}")
         pjsua_process = subprocess.Popen(
-            ['pjsua', '--config-file=/tmp/pjsua.conf'],
+            [pjsua_cmd, '--config-file=/tmp/pjsua.conf'],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -209,7 +250,8 @@ def status():
         return jsonify({
             "registered": pjsua_running,
             "server": SIP_SERVER,
-            "extension": EXTENSION
+            "extension": EXTENSION,
+            "pjsua_binary": pjsua_cmd
         }), 200
             
     except Exception as e:

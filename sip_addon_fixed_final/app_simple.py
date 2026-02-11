@@ -199,7 +199,7 @@ def call():
     if not pjsua_running:
         return jsonify({"error": "PJSUA not running"}), 503
 
-    command = f"m sip{destination}\n"
+    command = f"m sip:{destination}\n"
 
 
     logger.info(f"Calling {destination}")

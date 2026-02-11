@@ -2,13 +2,8 @@
 
 import os
 import sys
+import socket
 import logging
-import subprocess
-import threading
-import time
-import signal
-import shutil
-import pty
 from flask import Flask, request, jsonify
 
 # --------------------------------------------------
@@ -25,205 +20,112 @@ logger = logging.getLogger(__name__)
 # Environment Variables
 # --------------------------------------------------
 
-SIP_SERVER = os.getenv("SIP_SERVER")
-EXTENSION = os.getenv("EXTENSION")
-PASSWORD = os.getenv("PASSWORD")
-SIP_PORT = int(os.getenv("PORT", 5060))
+ASTERISK_HOST = os.getenv("ASTERISK_HOST")
+ASTERISK_PORT = int(os.getenv("ASTERISK_PORT", 5038))
+AMI_USER = os.getenv("AMI_USER")
+AMI_SECRET = os.getenv("AMI_SECRET")
 
-# --------------------------------------------------
-# Globals
-# --------------------------------------------------
+CALLER_EXTENSION = os.getenv("CALLER_EXTENSION")  # e.g. 1023
+CONTEXT = os.getenv("ASTERISK_CONTEXT", "from-internal")
 
 app = Flask(__name__)
 
-pjsua_process = None
-pjsua_running = False
-pty_master_fd = None
-pjsua_cmd = None
-
 # --------------------------------------------------
-# Find PJSUA Binary
+# AMI Helper
 # --------------------------------------------------
 
-def find_pjsua():
-    global pjsua_cmd
-
-    for cmd in ["pjsua"]:
-        path = shutil.which(cmd)
-        if path:
-            pjsua_cmd = path
-            logger.info(f"Found PJSUA at: {path}")
-            return True
-
-    logger.error("PJSUA not found in system!")
-    return False
-
-
-# --------------------------------------------------
-# Create PJSUA Config
-# --------------------------------------------------
-
-def create_config():
-    config = f"""
---id sip:{EXTENSION}@{SIP_SERVER}
---registrar sip:{SIP_SERVER}
---realm *
---username {EXTENSION}
---password {PASSWORD}
---local-port {SIP_PORT}
---auto-answer 200
---null-audio
---no-cli
-"""
-
-    with open("/tmp/pjsua.conf", "w") as f:
-        f.write(config.strip())
-
-    logger.info("PJSUA config created")
-
-
-# --------------------------------------------------
-# Read PTY Output (prevents exit)
-# --------------------------------------------------
-
-def read_pty_output(master_fd):
-    while True:
-        try:
-            output = os.read(master_fd, 1024).decode(errors="ignore")
-            if output.strip():
-                logger.info(f"PJSUA: {output.strip()}")
-        except Exception:
-            break
-
-
-# --------------------------------------------------
-# Start PJSUA
-# --------------------------------------------------
-
-def start_pjsua():
-    global pjsua_process, pjsua_running, pty_master_fd
-
-    if not find_pjsua():
-        return False
-
-    create_config()
-
-    logger.info("Starting PJSUA in PTY mode...")
-
-    master_fd, slave_fd = pty.openpty()
-    pty_master_fd = master_fd
-
-    pjsua_process = subprocess.Popen(
-        [pjsua_cmd, "--config-file=/tmp/pjsua.conf"],
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        close_fds=True
-    )
-
-    threading.Thread(
-        target=read_pty_output,
-        args=(master_fd,),
-        daemon=True
-    ).start()
-
-    time.sleep(3)
-
-    if pjsua_process.poll() is not None:
-        logger.error("PJSUA exited immediately")
-        return False
-
-    pjsua_running = True
-    logger.info("PJSUA running successfully")
-    return True
-
-
-# --------------------------------------------------
-# Stop PJSUA
-# --------------------------------------------------
-
-def stop_pjsua():
-    global pjsua_running
-
+def send_ami_action(action_lines):
     try:
-        if pty_master_fd:
-            os.write(pty_master_fd, b"q\n")
-    except Exception:
-        pass
+        s = socket.create_connection((ASTERISK_HOST, ASTERISK_PORT), timeout=5)
 
-    if pjsua_process:
-        try:
-            pjsua_process.terminate()
-            pjsua_process.wait(timeout=5)
-        except Exception:
-            pjsua_process.kill()
+        # Read AMI banner
+        s.recv(1024)
 
-    pjsua_running = False
-    logger.info("PJSUA stopped")
+        # Login
+        login_action = (
+            f"Action: Login\r\n"
+            f"Username: {AMI_USER}\r\n"
+            f"Secret: {AMI_SECRET}\r\n"
+            f"\r\n"
+        )
+        s.sendall(login_action.encode())
+        s.recv(1024)
+
+        # Send requested action
+        s.sendall(action_lines.encode())
+        response = s.recv(4096).decode(errors="ignore")
+
+        # Logoff
+        s.sendall(b"Action: Logoff\r\n\r\n")
+        s.close()
+
+        logger.info(f"AMI response: {response.strip()}")
+        return True
+
+    except Exception as e:
+        logger.error(f"AMI connection failed: {e}")
+        return False
 
 
 # --------------------------------------------------
-# Signal Handling
+# Call Endpoint (Click-to-Call)
 # --------------------------------------------------
-
-def handle_signal(sig, frame):
-    logger.info("Shutting down...")
-    stop_pjsua()
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, handle_signal)
-signal.signal(signal.SIGTERM, handle_signal)
-
-
-# --------------------------------------------------
-# Flask Routes
-# --------------------------------------------------
-
-@app.route("/health", methods=["GET"])
-def health():
-    if pjsua_running and pjsua_process.poll() is None:
-        return jsonify({"status": "healthy"}), 200
-    return jsonify({"status": "unhealthy"}), 503
-
 
 @app.route("/call", methods=["POST"])
-def call():
-    global pty_master_fd
-
+def make_call():
     data = request.get_json(force=True) or {}
-    destination = data.get("destination")
+    number = data.get("destination")
 
-    if not destination:
+    if not number:
         return jsonify({"error": "destination required"}), 400
 
-    if not pjsua_running:
-        return jsonify({"error": "PJSUA not running"}), 503
+    logger.info(f"Initiating call to {number}")
 
-    command = f"m sip:{destination}\n"
+    originate_action = (
+        f"Action: Originate\r\n"
+        f"Channel: PJSIP/{CALLER_EXTENSION}\r\n"
+        f"Context: {CONTEXT}\r\n"
+        f"Exten: {number}\r\n"
+        f"Priority: 1\r\n"
+        f"CallerID: HomeAssistant\r\n"
+        f"Async: true\r\n"
+        f"\r\n"
+    )
 
+    success = send_ami_action(originate_action)
 
-    logger.info(f"Calling {destination}")
-
-    try:
-        os.write(pty_master_fd, command.encode())
+    if success:
         return jsonify({"status": "calling"}), 200
-    except Exception as e:
-        logger.error(f"Call failed: {e}")
-        return jsonify({"error": "call failed"}), 500
+    return jsonify({"error": "AMI call failed"}), 500
 
+
+# --------------------------------------------------
+# Hangup Endpoint
+# --------------------------------------------------
 
 @app.route("/hangup", methods=["POST"])
 def hangup():
-    global pty_master_fd
+    # This hangs up all active channels of CALLER_EXTENSION
+    hangup_action = (
+        f"Action: Hangup\r\n"
+        f"Channel: PJSIP/{CALLER_EXTENSION}\r\n"
+        f"\r\n"
+    )
 
-    if not pjsua_running:
-        return jsonify({"error": "PJSUA not running"}), 503
+    success = send_ami_action(hangup_action)
 
-    try:
-        os.write(pty_master_fd, b"h\n")
-        return jsonify({"status": "hung up"}), 200
-    except Exception:
-        return jsonify({"error": "hangup failed"}), 500
+    if success:
+        return jsonify({"status": "hangup sent"}), 200
+    return jsonify({"error": "hangup failed"}), 500
+
+
+# --------------------------------------------------
+# Status
+# --------------------------------------------------
+
+@app.route("/status", methods=["GET"])
+def status():
+    return jsonify({"status": "running"}), 200
 
 
 # --------------------------------------------------
@@ -231,17 +133,11 @@ def hangup():
 # --------------------------------------------------
 
 def main():
-    logger.info("Starting SIP Softphone...")
-
-    if not SIP_SERVER or not EXTENSION or not PASSWORD:
-        logger.error("Missing SIP_SERVER, EXTENSION or PASSWORD")
+    if not all([ASTERISK_HOST, AMI_USER, AMI_SECRET, CALLER_EXTENSION]):
+        logger.error("Missing required environment variables")
         sys.exit(1)
 
-    if not start_pjsua():
-        logger.error("Failed to start PJSUA")
-        sys.exit(1)
-
-    logger.info("API running on port 8099")
+    logger.info("Starting AMI Softphone Backend")
     app.run(host="0.0.0.0", port=8099)
 
 

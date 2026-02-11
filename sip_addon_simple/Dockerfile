@@ -1,22 +1,25 @@
-ARG BUILD_FROM
-FROM ${BUILD_FROM}
+FROM alpine:3.19
 
 # Install dependencies
 RUN apk add --no-cache \
+    bash \
+    jq \
     python3 \
     py3-pip \
     pjproject \
     alsa-lib \
-    alsa-utils \
-    jq
+    alsa-utils
 
 # Install Python packages
 RUN pip3 install --no-cache-dir --break-system-packages \
-    flask==3.0.0 \
-    requests==2.31.0
+    flask \
+    requests
 
 # Copy application
 COPY app_simple.py /app/app.py
+COPY run.sh /run.sh
+RUN chmod +x /run.sh
 
-# Copy rootfs (includes service script)
-COPY rootfs /
+WORKDIR /app
+
+ENTRYPOINT ["/run.sh"]

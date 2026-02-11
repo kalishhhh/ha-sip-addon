@@ -1,6 +1,6 @@
 {
   "name": "SIP Softphone",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "slug": "sip_softphone",
   "description": "SIP softphone for handling voice calls in Home Assistant",
   "arch": ["aarch64", "amd64", "armv7"],

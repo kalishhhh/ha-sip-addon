@@ -77,6 +77,7 @@ def create_pjsua_config():
     """
     Key change: --use-cli + --cli-telnet-port so PJSUA listens on TCP 2323.
     We do NOT pipe stdin at all — that's what was causing the broken pipe.
+    Note: this pjsua uses --local-port not --port, and no --no-vad/--ec-tail flags.
     """
     config = (
         f"--id sip:{EXTENSION}@{SIP_SERVER}\n"
@@ -86,14 +87,12 @@ def create_pjsua_config():
         f"--password {PASSWORD}\n"
         f"--auto-answer 200\n"
         f"--null-audio\n"
-        f"--no-vad\n"
-        f"--ec-tail 0\n"
         f"--use-cli\n"
-        f"--cli-telnet-port {PJSUA_CLI_PORT}\n"  # <-- telnet interface
-        f"--port {SIP_PORT}\n"
+        f"--cli-telnet-port {PJSUA_CLI_PORT}\n"
+        f"--local-port {SIP_PORT}\n"             # <-- fixed: was --port
         f"--log-level 5\n"
         f"--app-log-level 5\n"
-        f"--log-file /tmp/pjsua.log\n"           # <-- full log to file
+        f"--log-file /tmp/pjsua.log\n"
     )
     with open('/tmp/pjsua.conf', 'w') as f:
         f.write(config)
@@ -175,10 +174,9 @@ def start_pjsua():
     deadline = time.time() + 8
     while time.time() < deadline:
         if pjsua_process.poll() is not None:
-            logger.error(
-                f"PJSUA exited immediately (code {pjsua_process.returncode}). "
-                f"Check /tmp/pjsua.log for details."
-            )
+            code = pjsua_process.returncode
+            reason = "invalid argument in config" if code == 0 else f"crash (exit code {code})"
+            logger.error(f"PJSUA exited immediately — {reason}. Check /tmp/pjsua.log for details.")
             _dump_pjsua_log()
             return False
         if _telnet_port_open():
@@ -221,12 +219,24 @@ def _log_pjsua_output():
 
 def _dump_pjsua_log():
     """Print /tmp/pjsua.log to help diagnose startup failures."""
+    # Try the log file first
     try:
         with open('/tmp/pjsua.log') as f:
             content = f.read()
-        logger.error(f"=== /tmp/pjsua.log ===\n{content[-3000:]}\n=== end ===")
+        if content.strip():
+            logger.error(f"=== /tmp/pjsua.log ===\n{content[-3000:]}\n=== end ===")
+            return
     except Exception:
-        logger.error("Could not read /tmp/pjsua.log")
+        pass
+    # Fall back to reading remaining stdout from the process
+    try:
+        remaining = pjsua_process.stdout.read()
+        if remaining:
+            logger.error(f"=== PJSUA stdout ===\n{remaining[-3000:]}\n=== end ===")
+        else:
+            logger.error("No PJSUA log output captured. Try running pjsua --help to check valid flags.")
+    except Exception:
+        logger.error("Could not read any PJSUA output.")
 
 
 def _watchdog():

@@ -3,18 +3,17 @@
 import os
 import sys
 import logging
-import signal
 import subprocess
 import threading
 import time
+import signal
 import shutil
-import socket
 import pty
 from flask import Flask, request, jsonify
 
-# -------------------------------------------------------------------
+# --------------------------------------------------
 # Logging
-# -------------------------------------------------------------------
+# --------------------------------------------------
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,74 +21,97 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# -------------------------------------------------------------------
-# Environment
-# -------------------------------------------------------------------
+# --------------------------------------------------
+# Environment Variables
+# --------------------------------------------------
 
 SIP_SERVER = os.getenv("SIP_SERVER")
-EXTENSION  = os.getenv("EXTENSION")
-PASSWORD   = os.getenv("PASSWORD")
-SIP_PORT   = int(os.getenv("PORT", 5060))
+EXTENSION = os.getenv("EXTENSION")
+PASSWORD = os.getenv("PASSWORD")
+SIP_PORT = int(os.getenv("PORT", 5060))
+
+# --------------------------------------------------
+# Globals
+# --------------------------------------------------
 
 app = Flask(__name__)
 
 pjsua_process = None
 pjsua_running = False
+pty_master_fd = None
 pjsua_cmd = None
 
-
-# -------------------------------------------------------------------
-# Find pjsua
-# -------------------------------------------------------------------
+# --------------------------------------------------
+# Find PJSUA Binary
+# --------------------------------------------------
 
 def find_pjsua():
     global pjsua_cmd
-    for cmd in ["pjsua", "pjsua-cli"]:
-        if shutil.which(cmd):
-            pjsua_cmd = cmd
-            logger.info(f"Found PJSUA at: {shutil.which(cmd)}")
+
+    for cmd in ["pjsua"]:
+        path = shutil.which(cmd)
+        if path:
+            pjsua_cmd = path
+            logger.info(f"Found PJSUA at: {path}")
             return True
-    logger.error("PJSUA not found")
+
+    logger.error("PJSUA not found in system!")
     return False
 
 
-# -------------------------------------------------------------------
-# Create config
-# -------------------------------------------------------------------
+# --------------------------------------------------
+# Create PJSUA Config
+# --------------------------------------------------
 
 def create_config():
-    config = (
-        f"--id sip:{EXTENSION}@{SIP_SERVER}\n"
-        f"--registrar sip:{SIP_SERVER}\n"
-        f"--realm *\n"
-        f"--username {EXTENSION}\n"
-        f"--password {PASSWORD}\n"
-        f"--null-audio\n"
-        f"--auto-answer 200\n"
-        f"--local-port={SIP_PORT}\n"
-    )
+    config = f"""
+--id sip:{EXTENSION}@{SIP_SERVER}
+--registrar sip:{SIP_SERVER}
+--realm *
+--username {EXTENSION}
+--password {PASSWORD}
+--local-port {SIP_PORT}
+--auto-answer 200
+--null-audio
+--no-cli
+"""
 
     with open("/tmp/pjsua.conf", "w") as f:
-        f.write(config)
+        f.write(config.strip())
 
-    logger.info("PJSUA config written")
+    logger.info("PJSUA config created")
 
 
-# -------------------------------------------------------------------
-# Start pjsua using PTY (REAL FIX)
-# -------------------------------------------------------------------
+# --------------------------------------------------
+# Read PTY Output (prevents exit)
+# --------------------------------------------------
+
+def read_pty_output(master_fd):
+    while True:
+        try:
+            output = os.read(master_fd, 1024).decode(errors="ignore")
+            if output.strip():
+                logger.info(f"PJSUA: {output.strip()}")
+        except Exception:
+            break
+
+
+# --------------------------------------------------
+# Start PJSUA
+# --------------------------------------------------
 
 def start_pjsua():
-    global pjsua_process, pjsua_running
+    global pjsua_process, pjsua_running, pty_master_fd
 
     if not find_pjsua():
         return False
 
     create_config()
 
-    logger.info("Starting PJSUA inside PTY...")
+    logger.info("Starting PJSUA in PTY mode...")
 
     master_fd, slave_fd = pty.openpty()
+    pty_master_fd = master_fd
 
     pjsua_process = subprocess.Popen(
         [pjsua_cmd, "--config-file=/tmp/pjsua.conf"],
@@ -98,8 +120,6 @@ def start_pjsua():
         stderr=slave_fd,
         close_fds=True
     )
-
-    pjsua_running = True
 
     threading.Thread(
         target=read_pty_output,
@@ -113,97 +133,114 @@ def start_pjsua():
         logger.error("PJSUA exited immediately")
         return False
 
+    pjsua_running = True
     logger.info("PJSUA running successfully")
     return True
 
 
-def read_pty_output(master_fd):
-    while True:
-        try:
-            output = os.read(master_fd, 1024).decode(errors="ignore")
-            if output.strip():
-                logger.info(f"PJSUA: {output.strip()}")
-        except Exception:
-            break
+# --------------------------------------------------
+# Stop PJSUA
+# --------------------------------------------------
 
+def stop_pjsua():
+    global pjsua_running
 
-# -------------------------------------------------------------------
-# Command sender (write to PTY)
-# -------------------------------------------------------------------
-
-def send_command(cmd):
-    global pjsua_process
-    if not pjsua_running:
-        return False
     try:
-        pjsua_process.stdin.write((cmd + "\n").encode())
-        return True
-    except Exception as e:
-        logger.error(f"Command failed: {e}")
-        return False
+        if pty_master_fd:
+            os.write(pty_master_fd, b"q\n")
+    except Exception:
+        pass
+
+    if pjsua_process:
+        try:
+            pjsua_process.terminate()
+            pjsua_process.wait(timeout=5)
+        except Exception:
+            pjsua_process.kill()
+
+    pjsua_running = False
+    logger.info("PJSUA stopped")
 
 
-# -------------------------------------------------------------------
-# API
-# -------------------------------------------------------------------
+# --------------------------------------------------
+# Signal Handling
+# --------------------------------------------------
+
+def handle_signal(sig, frame):
+    logger.info("Shutting down...")
+    stop_pjsua()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, handle_signal)
+signal.signal(signal.SIGTERM, handle_signal)
+
+
+# --------------------------------------------------
+# Flask Routes
+# --------------------------------------------------
+
+@app.route("/health", methods=["GET"])
+def health():
+    if pjsua_running and pjsua_process.poll() is None:
+        return jsonify({"status": "healthy"}), 200
+    return jsonify({"status": "unhealthy"}), 503
+
 
 @app.route("/call", methods=["POST"])
 def call():
-    data = request.get_json(force=True, silent=True) or {}
-    dest = data.get("destination")
+    global pty_master_fd
 
-    if not dest:
+    data = request.get_json(force=True) or {}
+    destination = data.get("destination")
+
+    if not destination:
         return jsonify({"error": "destination required"}), 400
 
-    command = f"m sip:{dest}@{SIP_SERVER}"
-    logger.info(f"Calling {dest}")
+    if not pjsua_running:
+        return jsonify({"error": "PJSUA not running"}), 503
 
-    os.write(pjsua_process.stdin.fileno(), (command + "\n").encode())
+    command = f"m sip:{destination}@{SIP_SERVER}\n"
 
-    return jsonify({"status": "calling"})
+    logger.info(f"Calling {destination}")
+
+    try:
+        os.write(pty_master_fd, command.encode())
+        return jsonify({"status": "calling"}), 200
+    except Exception as e:
+        logger.error(f"Call failed: {e}")
+        return jsonify({"error": "call failed"}), 500
 
 
 @app.route("/hangup", methods=["POST"])
 def hangup():
-    os.write(pjsua_process.stdin.fileno(), b"h\n")
-    return jsonify({"status": "hangup"})
+    global pty_master_fd
+
+    if not pjsua_running:
+        return jsonify({"error": "PJSUA not running"}), 503
+
+    try:
+        os.write(pty_master_fd, b"h\n")
+        return jsonify({"status": "hung up"}), 200
+    except Exception:
+        return jsonify({"error": "hangup failed"}), 500
 
 
-@app.route("/status", methods=["GET"])
-def status():
-    alive = pjsua_process and pjsua_process.poll() is None
-    return jsonify({"running": alive})
-
-
-# -------------------------------------------------------------------
-# Shutdown
-# -------------------------------------------------------------------
-
-def shutdown(sig, frame):
-    logger.info("Stopping...")
-    if pjsua_process:
-        pjsua_process.terminate()
-    sys.exit(0)
-
-
-signal.signal(signal.SIGTERM, shutdown)
-signal.signal(signal.SIGINT, shutdown)
-
-
-# -------------------------------------------------------------------
+# --------------------------------------------------
 # Main
-# -------------------------------------------------------------------
+# --------------------------------------------------
 
 def main():
-    logger.info("Starting SIP Softphone")
+    logger.info("Starting SIP Softphone...")
 
     if not SIP_SERVER or not EXTENSION or not PASSWORD:
-        logger.error("Missing SIP config")
+        logger.error("Missing SIP_SERVER, EXTENSION or PASSWORD")
         sys.exit(1)
 
     if not start_pjsua():
+        logger.error("Failed to start PJSUA")
         sys.exit(1)
 
+    logger.info("API running on port 8099")
     app.run(host="0.0.0.0", port=8099)
 
 
